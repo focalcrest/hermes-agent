@@ -43,8 +43,12 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="git@github.com:NousResearch/hermes-agent.git"
-REPO_URL_HTTPS="https://github.com/NousResearch/hermes-agent.git"
+# Focalcrest fork, not upstream — this branch (focalcrest-deploy) is the
+# ClawMatrix VM template's own install source, kept separate from
+# context-usage-fields (the clean branch meant for an eventual PR back to
+# NousResearch/hermes-agent, which must NOT point at this fork).
+REPO_URL_SSH="git@github.com:focalcrest/hermes-agent.git"
+REPO_URL_HTTPS="https://github.com/focalcrest/hermes-agent.git"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 # INSTALL_DIR is resolved AFTER arg parsing and OS detection so we can pick an
 # FHS-style layout for root installs.  Track whether the user gave us an
@@ -71,7 +75,7 @@ USE_VENV=true
 RUN_SETUP=true
 SKIP_BROWSER=false
 NO_SKILLS=false
-BRANCH="main"
+BRANCH="focalcrest-deploy"
 INSTALL_COMMIT=""
 FORCE_COMMIT=false
 ENSURE_DEPS=""
