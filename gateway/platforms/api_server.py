@@ -4413,6 +4413,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
+                "last_prompt_tokens": usage.get("last_prompt_tokens", 0),
+                "context_length": usage.get("context_length", 0),
             }
             incomplete_history = list(conversation_history)
             incomplete_history.append({"role": "user", "content": user_message})
@@ -4756,6 +4758,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
+                    "last_prompt_tokens": usage.get("last_prompt_tokens", 0),
+                    "context_length": usage.get("context_length", 0),
                 }
                 _failed_history = list(conversation_history)
                 _failed_history.append({"role": "user", "content": user_message})
@@ -4780,6 +4784,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
+                    "last_prompt_tokens": usage.get("last_prompt_tokens", 0),
+                    "context_length": usage.get("context_length", 0),
                 }
                 full_history = self._build_response_conversation_history(
                     conversation_history,
@@ -4852,6 +4858,8 @@ class APIServerAdapter(BasePlatformAdapter):
                     "input_tokens": usage.get("input_tokens", 0),
                     "output_tokens": usage.get("output_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
+                    "last_prompt_tokens": usage.get("last_prompt_tokens", 0),
+                    "context_length": usage.get("context_length", 0),
                 }
                 await _write_event("response.failed", {
                     "type": "response.failed",
@@ -5162,6 +5170,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
                 "total_tokens": usage.get("total_tokens", 0),
+                "last_prompt_tokens": usage.get("last_prompt_tokens", 0),
+                "context_length": usage.get("context_length", 0),
             },
         }
 
@@ -5844,6 +5854,27 @@ class APIServerAdapter(BasePlatformAdapter):
                         "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                         "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
                     }
+                    # Surface the same context-window fields the webui's own
+                    # streaming path already reports (see api/streaming.py's
+                    # SSE usage payload) so API callers (POST /v1/responses
+                    # and anything else routed through _run_agent) can show
+                    # an accurate context-usage indicator too, instead of
+                    # only ever seeing session_prompt_tokens above — a
+                    # cumulative sum across every internal LLM call this
+                    # turn made (tool-use round trips included), not a
+                    # snapshot of the actual current prompt size.
+                    # last_prompt_tokens/context_length are per-call, not
+                    # cumulative. context_length is only included when
+                    # known (0 means "not resolved yet" — the same "no
+                    # limit reported" case this key's absence already
+                    # means for callers), matching the webui path's own
+                    # convention.
+                    _api_ctx_compressor = getattr(agent, "context_compressor", None)
+                    if _api_ctx_compressor is not None:
+                        usage["last_prompt_tokens"] = getattr(_api_ctx_compressor, "last_prompt_tokens", 0) or 0
+                        _api_ctx_length = getattr(_api_ctx_compressor, "context_length", 0) or 0
+                        if _api_ctx_length:
+                            usage["context_length"] = _api_ctx_length
                     # Include the effective session ID in the result so callers
                     # (e.g. X-Hermes-Session-Id header) can track compression-
                     # triggered session rotations. (#16938)
@@ -6332,6 +6363,15 @@ class APIServerAdapter(BasePlatformAdapter):
                             "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                             "total_tokens": getattr(agent, "session_total_tokens", 0) or 0,
                         }
+                        # See the equivalent block in _run_agent's own usage
+                        # dict above for why these two are worth surfacing
+                        # separately from session_prompt_tokens.
+                        _sync_ctx_compressor = getattr(agent, "context_compressor", None)
+                        if _sync_ctx_compressor is not None:
+                            u["last_prompt_tokens"] = getattr(_sync_ctx_compressor, "last_prompt_tokens", 0) or 0
+                            _sync_ctx_length = getattr(_sync_ctx_compressor, "context_length", 0) or 0
+                            if _sync_ctx_length:
+                                u["context_length"] = _sync_ctx_length
                         return r, u
 
                 result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
