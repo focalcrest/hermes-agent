@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from typing import Any, Dict, Optional
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -48,8 +49,8 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 30  # fallback when config is unreadable
 _SNAPSHOT_MAX_CHARS = 80_000  # camofox paginates at this limit
-_vnc_url: Optional[str] = None  # cached from /health response
-_vnc_url_checked = False  # only probe once per process
+_vnc_share_url: Optional[str] = None  # cached from the last successful vnc-token mint
+_vnc_share_url_exp = 0.0  # unix time _vnc_share_url's token expires
 
 # Cached command timeout from config (resolved lazily, like browser_tool)
 _cached_cmd_timeout: Optional[int] = None
@@ -132,34 +133,99 @@ def is_camofox_mode() -> bool:
 
 def check_camofox_available() -> bool:
     """Verify the Camofox server is reachable."""
-    global _vnc_url, _vnc_url_checked
     url = get_camofox_url()
     if not url:
         return False
     try:
         resp = requests.get(f"{url}/health", timeout=5)
-        if resp.status_code == 200 and not _vnc_url_checked:
-            try:
-                data = resp.json()
-                vnc_port = data.get("vncPort")
-                if isinstance(vnc_port, int) and 1 <= vnc_port <= 65535:
-                    from urllib.parse import urlparse
-                    parsed = urlparse(url)
-                    host = parsed.hostname or "localhost"
-                    _vnc_url = f"http://{host}:{vnc_port}"
-            except (ValueError, KeyError):
-                pass
-            _vnc_url_checked = True
         return resp.status_code == 200
     except Exception:
         return False
 
 
+def _camofox_novnc_port() -> Optional[int]:
+    """Return Camofox's configured noVNC web port, or None if VNC isn't
+    enabled/running.
+
+    This is Camofox's ``vnc`` plugin's own status endpoint — deliberately
+    *not* ``/health``, which never carries this field (its ``vncPort``/
+    ``novncPort`` are registered on a separate ``GET /vnc/status`` route).
+    """
+    url = get_camofox_url()
+    if not url:
+        return None
+    try:
+        resp = requests.get(f"{url}/vnc/status", timeout=5)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if not data.get("enabled") or not data.get("running"):
+            return None
+        port = data.get("novncPort")
+        return port if isinstance(port, int) and 1 <= port <= 65535 else None
+    except Exception:
+        return None
+
+
 def get_vnc_url() -> Optional[str]:
-    """Return the VNC URL if the Camofox server exposes one, or None."""
-    if not _vnc_url_checked:
-        check_camofox_available()
-    return _vnc_url
+    """Return a shareable, authenticated link a human can open to watch or
+    take over the live browser session, or None if VNC isn't available.
+
+    This is a ClawMatrix control-plane URL (``<facade-base>/vnc/<vm-id>?...``),
+    not a raw Camofox/VNC address — a raw address would either be
+    unreachable from outside the VM's isolated network or (worse) reachable
+    but unauthenticated. The control plane reverse-proxies it and gates
+    access with a short-lived, per-request signed token (see
+    ``handleVNCTokenMint``/``handleVNCProxy`` in clawmatrix's
+    internal/server.go), so the human on the other end of this chat can
+    open it directly with no VM/admin access of their own. Minted fresh
+    whenever the cached one is at (or near) its expiry; CLAWMATRIX_FACADE_URL/
+    CLAWMATRIX_FACADE_TOKEN are the same facade credentials this profile
+    already authenticates with — no separate credential to manage.
+
+    NOT MATTERMOST_URL/MATTERMOST_TOKEN, despite what an earlier version of
+    this comment claimed: those are Hermes's own built-in Mattermost
+    connector's env vars, deliberately never set for any ClawMatrix-spawned
+    instance (see cmd/clawmatrix-agent/supervisor.go) since the native
+    driver replaced that connector entirely. Reading them here silently
+    disabled this whole function -- get_camofox_url()/CAMOFOX_URL still
+    worked, so navigation kept working, but every vnc_url came back None
+    with no visible error, until the model was left to guess a raw
+    fallback address on its own.
+    """
+    global _vnc_share_url, _vnc_share_url_exp
+    if _vnc_share_url and time.time() < _vnc_share_url_exp - 30:
+        return _vnc_share_url
+
+    novnc_port = _camofox_novnc_port()
+    if novnc_port is None:
+        return None
+
+    base_url = os.getenv("CLAWMATRIX_FACADE_URL", "").rstrip("/")
+    token = os.getenv("CLAWMATRIX_FACADE_TOKEN", "")
+    if not base_url or not token:
+        return None
+
+    try:
+        resp = requests.post(
+            f"{base_url}/api/internal/vnc-token",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"port": novnc_port},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        url = data.get("url")
+        if not url:
+            return None
+    except Exception:
+        logger.warning("failed to mint a VNC takeover link", exc_info=True)
+        return None
+
+    _vnc_share_url = url
+    _vnc_share_url_exp = time.time() + 5 * 60  # matches the control plane's own TTL
+    return _vnc_share_url
 
 
 def _get_camofox_config() -> Dict[str, Any]:
@@ -534,8 +600,14 @@ def camofox_navigate(url: str, task_id: Optional[str] = None) -> str:
         if vnc:
             result["vnc_url"] = vnc
             result["vnc_hint"] = (
-                "Browser is visible via VNC. "
-                "Share this link with the user so they can watch the browser live."
+                "A human can watch and directly control this browser session at "
+                "the vnc_url above. If THIS page (or any page you reach later in "
+                "this task) needs a login, password, CAPTCHA, QR-code scan, or any "
+                "other manual step you cannot complete yourself: you MUST include "
+                "the exact vnc_url in your reply to the user, not just a "
+                "description of the page. Tell them specifically what's blocking "
+                "you and give them this link so they can take over — do not ask "
+                "them what to do next without also giving them the link."
             )
 
         # Auto-take a compact snapshot so the model can act immediately
