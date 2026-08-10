@@ -224,8 +224,11 @@ class TestChatCompletionsBuildKwargs:
         from providers import get_provider_profile
         profile = get_provider_profile("custom")
         msgs = [{"role": "user", "content": "Hi"}]
+        # Non-Qwen3 model deliberately — see TestCustomQwen3ThinkingWireShape
+        # in tests/plugins/model_providers/test_custom_profile.py for why a
+        # "qwen3" model name now takes a different branch entirely.
         kw = transport.build_kwargs(
-            model="qwen3", messages=msgs,
+            model="glm-5.2", messages=msgs,
             provider_profile=profile,
             reasoning_config={"effort": "none"},
         )
