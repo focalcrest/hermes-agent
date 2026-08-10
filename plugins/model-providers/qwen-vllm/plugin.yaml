@@ -1,5 +1,0 @@
-name: qwen-vllm-provider
-kind: model-provider
-version: 1.0.0
-description: Self-hosted Qwen3 over vLLM/SGLang or any OpenAI-compatible endpoint
-author: ClawMatrix
